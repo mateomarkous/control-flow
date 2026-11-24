@@ -157,6 +157,58 @@ object Ctl {
         prefs.edit().putString("shortcuts", arr.toString()).apply()
     }
 
+    /** Package name inside a launch link, if the link points to an installed app (not a web link). */
+    fun pkgOf(link: String): String? = when {
+        link.startsWith("market://launch?id=") -> link.removePrefix("market://launch?id=").substringBefore('&')
+        link.startsWith("android-app://") -> link.removePrefix("android-app://").substringBefore('/')
+        link.startsWith("intent:") -> Regex("package=([^;]+)").find(link)?.groupValues?.get(1)
+        else -> null
+    }
+
+    private fun launchVariants(pkg: String) = listOf(
+        "market://launch?id=$pkg",
+        "android-app://$pkg",
+        "intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LEANBACK_LAUNCHER;launchFlags=0x10000000;package=$pkg;end",
+        "intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;launchFlags=0x10000000;package=$pkg;end",
+    )
+
+    @Volatile private var launching = false
+
+    /**
+     * Opens a shortcut. For installed apps it tries several launch formats and checks with the box
+     * (which reports the app on screen) which one worked; the working one is remembered.
+     */
+    fun openShortcut(index: Int) {
+        val sc = shortcuts.value.getOrNull(index) ?: return
+        val pkg = pkgOf(sc.link)
+        if (pkg == null) { openApp(sc.link); return }
+        if (conn.value != Conn.Connected) { openApp(sc.link); return }
+        if (launching) return
+        launching = true
+        thread {
+            try {
+                val candidates = (listOf(sc.link) + launchVariants(pkg)).distinct()
+                for (link in candidates) {
+                    openApp(link)
+                    for (i in 0 until 14) { // ~3.5 s
+                        Thread.sleep(250)
+                        if (currentApp.value == pkg) {
+                            if (link != sc.link) {
+                                val l = shortcuts.value.toMutableList()
+                                val j = l.indexOfFirst { it.name == sc.name && it.link == sc.link }
+                                if (j >= 0) { l[j] = sc.copy(link = link); main.post { saveShortcuts(l) } }
+                            }
+                            return@thread
+                        }
+                    }
+                }
+                main.post {
+                    android.widget.Toast.makeText(app, "No pude abrir ${sc.name} en el deco", android.widget.Toast.LENGTH_LONG).show()
+                }
+            } finally { launching = false }
+        }
+    }
+
     // ---- Pairing ----
     fun startPairing(h: String, cb: (String?) -> Unit) {
         disconnect()

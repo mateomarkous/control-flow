@@ -296,7 +296,7 @@ fun RemoteScreen(conn: Conn, onSetup: () -> Unit) {
                         if (i == -1) AddTile(u, Modifier.weight(1f)) { editIndex = -1 }
                         else {
                             val sc = shortcuts[i]
-                            ShortcutTile(u, sc, Modifier.weight(1f), onTap = { Ctl.openApp(sc.link) }, onLongPress = { editIndex = i })
+                            ShortcutTile(u, sc, Modifier.weight(1f), onTap = { Ctl.openShortcut(i) }, onLongPress = { editIndex = i })
                         }
                     }
                     repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
@@ -412,7 +412,7 @@ fun ShortcutDialog(index: Int, onClose: () -> Unit) {
     var name by remember { mutableStateOf(editing?.name ?: "") }
     var link by remember { mutableStateOf(editing?.link ?: "") }
     var color by remember { mutableStateOf(editing?.color ?: 1) }
-    fun pkgOf(l: String) = l.removePrefix("market://launch?id=")
+    fun pkgOf(l: String) = Ctl.pkgOf(l) ?: l
 
     AlertDialog(
         onDismissRequest = onClose,
