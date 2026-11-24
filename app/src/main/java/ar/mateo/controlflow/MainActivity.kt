@@ -191,7 +191,7 @@ fun RemoteScreen(conn: Conn, onSetup: () -> Unit) {
         Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 14.dp, vertical = 8.dp)
     ) {
         // Everything is sized in "units" so the whole remote fits the screen height.
-        val designH = 1064f
+        val designH = 1160f // sum of every row + spacing (incl. HBO row and the 0 key)
         val u = min(maxHeight.value / designH, maxWidth.value / 400f).dp.coerceAtMost(1.15.dp)
         Column(
             Modifier
