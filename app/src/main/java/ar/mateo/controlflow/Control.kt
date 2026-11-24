@@ -124,7 +124,9 @@ object Ctl {
     }
 
     // ---- Shortcuts (app buttons the user can add, rename, reassign and reorder) ----
-    data class Shortcut(val name: String, val link: String, val color: Int)
+    data class Shortcut(val name: String, val link: String, val color: Int, val pkg: String? = null) {
+        fun packageName(): String? = pkg ?: Ctl.pkgOf(link)
+    }
 
     private val defaultShortcuts = listOf(
         Shortcut("NETFLIX", "netflix://", 0),
@@ -140,7 +142,7 @@ object Ctl {
             kotlinx.serialization.json.Json.parseToJsonElement(raw).let { it as kotlinx.serialization.json.JsonArray }.map { e ->
                 val o = e as kotlinx.serialization.json.JsonObject
                 fun str(k: String) = (o[k] as kotlinx.serialization.json.JsonPrimitive).content
-                Shortcut(str("name"), str("link"), str("color").toInt())
+                Shortcut(str("name"), str("link"), str("color").toInt(), (o["pkg"] as? kotlinx.serialization.json.JsonPrimitive)?.content)
             }
         } catch (_: Exception) { defaultShortcuts }
     }
@@ -152,6 +154,7 @@ object Ctl {
                 put("name", kotlinx.serialization.json.JsonPrimitive(it.name))
                 put("link", kotlinx.serialization.json.JsonPrimitive(it.link))
                 put("color", kotlinx.serialization.json.JsonPrimitive(it.color.toString()))
+                it.pkg?.let { p -> put("pkg", kotlinx.serialization.json.JsonPrimitive(p)) }
             }
         })
         prefs.edit().putString("shortcuts", arr.toString()).apply()
@@ -172,6 +175,33 @@ object Ctl {
         "intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;launchFlags=0x10000000;package=$pkg;end",
     )
 
+    /** Links some apps accept to be opened (the box opens links, not package names). */
+    val knownLinks = mapOf(
+        "com.cbs.ca" to listOf("https://www.paramountplus.com/ca/", "https://www.paramountplus.com", "paramountplus://"),
+        "com.cbs.ott" to listOf("https://www.paramountplus.com", "paramountplus://"),
+        "com.wbd.stream" to listOf("https://play.hbomax.com", "https://www.hbomax.com", "https://play.max.com", "hbomax://"),
+        "com.hbo.hbonow" to listOf("https://play.hbomax.com", "https://www.hbomax.com", "hbomax://"),
+        "com.spotify.tv.android" to listOf("spotify://", "https://open.spotify.com"),
+        "com.apple.atve.androidtv.appletv" to listOf("https://tv.apple.com"),
+        "com.netflix.ninja" to listOf("netflix://", "https://www.netflix.com/title"),
+        "com.google.android.youtube.tv" to listOf("https://www.youtube.com"),
+        "com.amazon.amazonvideo.livingroom" to listOf("https://app.primevideo.com"),
+        "com.disney.disneyplus" to listOf("https://www.disneyplus.com"),
+    )
+
+    fun defaultLinkFor(pkg: String) = knownLinks[pkg]?.first() ?: "market://launch?id=$pkg"
+
+    /** Sends a link and reports whether the app [pkg] ended up on screen (null = can't verify). */
+    fun testLaunch(link: String, pkg: String?, cb: (Boolean?) -> Unit) {
+        if (conn.value != Conn.Connected) { main.post { cb(false) }; return }
+        thread {
+            openApp(link)
+            if (pkg == null) { main.post { cb(null) }; return@thread }
+            for (i in 0 until 16) { Thread.sleep(250); if (currentApp.value == pkg) { main.post { cb(true) }; return@thread } }
+            main.post { cb(false) }
+        }
+    }
+
     @Volatile private var launching = false
 
     /**
@@ -180,14 +210,14 @@ object Ctl {
      */
     fun openShortcut(index: Int) {
         val sc = shortcuts.value.getOrNull(index) ?: return
-        val pkg = pkgOf(sc.link)
+        val pkg = sc.packageName()
         if (pkg == null) { openApp(sc.link); return }
         if (conn.value != Conn.Connected) { openApp(sc.link); return }
         if (launching) return
         launching = true
         thread {
             try {
-                val candidates = (listOf(sc.link) + launchVariants(pkg)).distinct()
+                val candidates = (listOf(sc.link) + (knownLinks[pkg] ?: emptyList()) + launchVariants(pkg)).distinct()
                 for (link in candidates) {
                     openApp(link)
                     for (i in 0 until 14) { // ~3.5 s
@@ -196,14 +226,14 @@ object Ctl {
                             if (link != sc.link) {
                                 val l = shortcuts.value.toMutableList()
                                 val j = l.indexOfFirst { it.name == sc.name && it.link == sc.link }
-                                if (j >= 0) { l[j] = sc.copy(link = link); main.post { saveShortcuts(l) } }
+                                if (j >= 0) { l[j] = sc.copy(link = link, pkg = pkg); main.post { saveShortcuts(l) } }
                             }
                             return@thread
                         }
                     }
                 }
                 main.post {
-                    android.widget.Toast.makeText(app, "No pude abrir ${sc.name} en el deco", android.widget.Toast.LENGTH_LONG).show()
+                    android.widget.Toast.makeText(app, "No pude abrir ${sc.name}. Mantené apretado el botón para probar otro link.", android.widget.Toast.LENGTH_LONG).show()
                 }
             } finally { launching = false }
         }
