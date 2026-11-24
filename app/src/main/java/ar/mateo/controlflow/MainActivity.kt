@@ -496,6 +496,257 @@ fun ShortcutDialog(index: Int, onClose: () -> Unit) {
     )
 }
 
+@Composable
+private fun sp(u: Dp, v: Int): TextUnit = with(LocalDensity.current) { (u * v).toSp() }
+
+@Composable
+private fun TextLabel(t: String, u: Dp, size: Int, weight: FontWeight = FontWeight.SemiBold) =
+    Text(t, color = Label, fontSize = sp(u, size), fontWeight = weight, textAlign = TextAlign.Center, maxLines = 1)
+
+/** Press handling shared by every key: haptic tick, fire, and optional auto-repeat while held. */
+private fun Modifier.pressKey(
+    repeat: Boolean,
+    onPressed: (Boolean) -> Unit,
+    fire: (Offset, IntSize) -> Unit,
+    haptic: () -> Unit,
+): Modifier = this.pointerInput(repeat) {
+    detectTapGestures(onPress = { pos ->
+        onPressed(true)
+        haptic()
+        fire(pos, size)
+        if (repeat) {
+            coroutineScope {
+                val job = launch {
+                    delay(450)
+                    while (isActive) { fire(pos, size); delay(110) }
+                }
+                tryAwaitRelease()
+                job.cancel()
+            }
+        } else {
+            tryAwaitRelease()
+        }
+        onPressed(false)
+    })
+}
+
+@Composable
+private fun rememberHaptic(): () -> Unit {
+    val view = LocalView.current
+    return remember(view) { { view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY) } }
+}
+
+@Composable
+fun RoundKey(
+    u: Dp,
+    diameter: Int,
+    bg: Color = Btn,
+    bgPressed: Color = BtnPressed,
+    repeat: Boolean = false,
+    onFire: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    var pressed by remember { mutableStateOf(false) }
+    val fire by rememberUpdatedState(onFire)
+    val haptic = rememberHaptic()
+    Box(
+        Modifier
+            .size(u * diameter)
+            .graphicsLayer { val s = if (pressed) 0.93f else 1f; scaleX = s; scaleY = s }
+            .shadow(if (pressed) 1.dp else 5.dp, CircleShape)
+            .clip(CircleShape)
+            .background(if (pressed) bgPressed else bg)
+            .border(1.dp, Color(0x22FFFFFF), CircleShape)
+            .pressKey(repeat, { pressed = it }, { _, _ -> fire() }, haptic),
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
+@Composable
+fun StatusKey(u: Dp, conn: Conn, onClick: () -> Unit) {
+    val color = when (conn) {
+        Conn.Connected -> Color(0xFF39D27A)
+        Conn.Connecting, Conn.Idle -> Color(0xFFF2B33D)
+        else -> Color(0xFFEF5350)
+    }
+    Box(
+        Modifier.size(u * 66).shadow(5.dp, CircleShape).clip(CircleShape).background(Btn)
+            .border(1.dp, Color(0x22FFFFFF), CircleShape).clickable { onClick() },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.size(u * 16).clip(CircleShape).background(color))
+    }
+}
+
+@Composable
+fun DPad(u: Dp, diameter: Int) {
+    var pressedKey by remember { mutableStateOf(0) }
+    val haptic = rememberHaptic()
+    val okFrac = 0.44f // OK button diameter relative to the ring
+    fun keyAt(p: Offset, s: IntSize): Int {
+        val cx = s.width / 2f; val cy = s.height / 2f
+        val dx = p.x - cx; val dy = p.y - cy
+        if (hypot(dx, dy) < s.width * okFrac / 2f) return K.OK
+        return if (abs(dx) > abs(dy)) (if (dx > 0) K.RIGHT else K.LEFT) else (if (dy > 0) K.DOWN else K.UP)
+    }
+    Box(
+        Modifier
+            .size(u * diameter)
+            .shadow(8.dp, CircleShape)
+            .clip(CircleShape)
+            .background(Brush.radialGradient(listOf(Turq, Color(0xFF5CC4C0))))
+            .pointerInput(Unit) {
+                detectTapGestures(onPress = { pos ->
+                    val k = keyAt(pos, size)
+                    pressedKey = k
+                    haptic()
+                    Ctl.key(k)
+                    if (k != K.OK) {
+                        coroutineScope {
+                            val job = launch { delay(450); while (isActive) { Ctl.key(k); delay(110) } }
+                            tryAwaitRelease(); job.cancel()
+                        }
+                    } else tryAwaitRelease()
+                    pressedKey = 0
+                })
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        // pressed highlight on the ring + subtle arrow marks
+        Canvas(Modifier.fillMaxSize()) {
+            val r = size.minDimension / 2f
+            val c = center
+            val mark = Color(0x332B6E6B)
+            val hl = Color(0x33000000)
+            if (pressedKey in listOf(K.UP, K.DOWN, K.LEFT, K.RIGHT)) {
+                val start = when (pressedKey) { K.RIGHT -> -45f; K.DOWN -> 45f; K.LEFT -> 135f; else -> 225f }
+                drawArc(hl, start, 90f, true)
+            }
+            val d = r * 0.80f; val a = r * 0.07f
+            fun chevron(dir: Int) {
+                val p = Path()
+                when (dir) {
+                    0 -> { p.moveTo(c.x - a, c.y - d + a); p.lineTo(c.x, c.y - d); p.lineTo(c.x + a, c.y - d + a) }
+                    1 -> { p.moveTo(c.x - a, c.y + d - a); p.lineTo(c.x, c.y + d); p.lineTo(c.x + a, c.y + d - a) }
+                    2 -> { p.moveTo(c.x - d + a, c.y - a); p.lineTo(c.x - d, c.y); p.lineTo(c.x - d + a, c.y + a) }
+                    else -> { p.moveTo(c.x + d - a, c.y - a); p.lineTo(c.x + d, c.y); p.lineTo(c.x + d - a, c.y + a) }
+                }
+                drawPath(p, mark, style = Stroke(width = r * 0.025f, cap = StrokeCap.Round))
+            }
+            for (i in 0..3) chevron(i)
+        }
+        Box(
+            Modifier
+                .size(u * (diameter * okFrac))
+                .graphicsLayer { val s = if (pressedKey == K.OK) 0.94f else 1f; scaleX = s; scaleY = s }
+                .shadow(6.dp, CircleShape)
+                .clip(CircleShape)
+                .background(if (pressedKey == K.OK) BtnPressed else Btn),
+            contentAlignment = Alignment.Center,
+        ) { TextLabel("OK", u, 30, FontWeight.Normal) }
+    }
+}
+
+@Composable
+fun Rocker(
+    u: Dp, label: String, onUp: () -> Unit, onDown: () -> Unit,
+    top: @Composable () -> Unit, bottom: @Composable () -> Unit,
+) {
+    var pressed by remember { mutableStateOf(0) }
+    val up by rememberUpdatedState(onUp)
+    val down by rememberUpdatedState(onDown)
+    val haptic = rememberHaptic()
+    val shape = RoundedCornerShape(u * 36)
+    Column(
+        Modifier.width(u * 70).height(u * 150).shadow(5.dp, shape).clip(shape).background(Btn)
+            .border(1.dp, Color(0x22FFFFFF), shape),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier.fillMaxWidth().weight(1f).background(if (pressed == 1) BtnPressed else Color.Transparent)
+                .pressKey(true, { pressed = if (it) 1 else 0 }, { _, _ -> up() }, haptic),
+            contentAlignment = Alignment.Center,
+        ) { top() }
+        Text(label, color = Label, fontSize = sp(u, 15), fontWeight = FontWeight.SemiBold)
+        Box(
+            Modifier.fillMaxWidth().weight(1f).background(if (pressed == 2) BtnPressed else Color.Transparent)
+                .pressKey(true, { pressed = if (it) 2 else 0 }, { _, _ -> down() }, haptic),
+            contentAlignment = Alignment.Center,
+        ) { bottom() }
+    }
+}
+
+@Composable
+fun AppPill(u: Dp, text: String, color: Color, weight: FontWeight, dot: Color? = null, onClick: () -> Unit) {
+    var pressed by remember { mutableStateOf(false) }
+    val fire by rememberUpdatedState(onClick)
+    val haptic = rememberHaptic()
+    val shape = RoundedCornerShape(u * 22)
+    Row(
+        Modifier.width(u * 136).height(u * 44)
+            .graphicsLayer { val s = if (pressed) 0.95f else 1f; scaleX = s; scaleY = s }
+            .shadow(4.dp, shape).clip(shape).background(if (pressed) Color(0xFFD9D9D6) else Pill)
+            .pressKey(false, { pressed = it }, { _, _ -> fire() }, haptic),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (dot != null) {
+            Box(Modifier.size(u * 16, u * 12).clip(RoundedCornerShape(u * 3)).background(dot), contentAlignment = Alignment.Center) {
+                Canvas(Modifier.size(u * 6)) {
+                    val p = Path(); p.moveTo(0f, 0f); p.lineTo(size.width, size.height / 2); p.lineTo(0f, size.height); p.close()
+                    drawPath(p, Color.White)
+                }
+            }
+            Spacer(Modifier.width(u * 4))
+        }
+        Text(text, color = color, fontSize = sp(u, 17), fontWeight = weight, maxLines = 1)
+    }
+}
+
+/** Type on the phone and send the text to the search box on the TV. */
+@Composable
+fun KeyboardDialog(onClose: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    var lastSent by remember { mutableStateOf<String?>(null) }
+    val focus = remember { FocusRequester() }
+    val haptic = rememberHaptic()
+    LaunchedEffect(Unit) { delay(150); try { focus.requestFocus() } catch (_: Exception) {} }
+    fun send(search: Boolean, letterByLetter: Boolean = false) {
+        haptic()
+        if (text.isNotEmpty()) { Ctl.sendText(text, letterByLetter); lastSent = text; text = "" }
+        if (search) Ctl.key(66) // ENTER
+    }
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Teclado") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Primero abrí la búsqueda en la tele (que aparezca su teclado). Después escribí acá.", color = Color(0xFFAAAAAA), fontSize = 13.sp)
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it }, singleLine = true,
+                    placeholder = { Text("¿Qué querés buscar?") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { send(search = true) }),
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Button(onClick = { send(search = false) }, enabled = text.isNotEmpty()) { Text("Enviar") }
+                    Button(onClick = { send(search = true) }, colors = ButtonDefaults.buttonColors(containerColor = Turq)) { Text("Buscar ⏎") }
+                    Spacer(Modifier.weight(1f))
+                    RoundKey(1.dp, 44, repeat = true, onFire = { Ctl.key(67) }) { Text("⌫", color = Label, fontSize = 18.sp) }
+                }
+                lastSent?.let {
+                    Text("Enviado: \"$it\"", color = Color(0xFF8BD9A9), fontSize = 13.sp)
+                    TextButton(onClick = { Ctl.sendText(it, letterByLetter = true) }) {
+                        Text("¿No apareció en la tele? Mandarlo letra por letra", fontSize = 13.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onClose) { Text("Cerrar") } },
+    )
+}
+
 // ---- small drawn icons
 @Composable
 private fun KeyboardIcon(u: Dp) = Canvas(Modifier.size(u * 28, u * 20)) {
