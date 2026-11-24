@@ -141,8 +141,14 @@ class RemoteSession(
     @Volatile private var closed = false
     private val writer = Executors.newSingleThreadExecutor()
 
-    // PING | KEY | POWER | VOLUME | APP_LINK
-    private val features = 1 or 2 or 32 or 64 or 512
+    // PING | KEY | IME | POWER | VOLUME | APP_LINK
+    private val features = 1 or 2 or 4 or 32 or 64 or 512
+
+    // Text-input state reported by the box when a text field is focused
+    @Volatile private var imeCounter = 0
+    @Volatile private var fieldCounter = 0
+    @Volatile var imeSeen = false
+        private set
 
     fun start() {
         thread(name = "atv-remote", isDaemon = true) { run() }
@@ -192,6 +198,22 @@ class RemoteSession(
             }
             m.has(2) -> write(PB().msg(2, PB().int(1, features))) // remote_set_active
             m.has(8) -> write(PB().msg(9, PB().int(1, m.msg(8)?.int(1) ?: 0L))) // ping -> pong
+            m.has(20) -> { // remote_ime_key_inject: a text field got focus
+                val k = m.msg(20)
+                k?.msg(1)?.let { imeCounter = it.int(1).toInt() }
+                k?.msg(2)?.let { fieldCounter = it.int(1).toInt() }
+                imeSeen = true
+            }
+            m.has(22) -> { // remote_ime_show_request
+                m.msg(22)?.msg(2)?.let { fieldCounter = it.int(1).toInt(); imeSeen = true }
+            }
+            m.has(21) -> { // remote_ime_batch_edit (echo of the field state)
+                m.msg(21)?.let {
+                    if (imeCounter == 0) imeCounter = it.int(1).toInt()
+                    if (fieldCounter == 0) fieldCounter = it.int(2).toInt()
+                    imeSeen = true
+                }
+            }
             else -> {}
         }
     }
@@ -211,6 +233,35 @@ class RemoteSession(
     fun key(code: Int, direction: Int = 3) = write(PB().msg(10, PB().int(1, code).int(2, direction)))
 
     fun openApp(link: String) = write(PB().msg(90, PB().str(1, link)))
+
+    /** Types text into the focused field on the TV (search boxes). */
+    fun sendText(text: String, letterByLetter: Boolean = false) {
+        if (text.isEmpty()) return
+        if (imeSeen && !letterByLetter) {
+            val n = text.length
+            val obj = PB().int(1, n).int(2, n).str(3, text)
+            val edit = PB().int(1, 1).msg(2, obj)
+            write(PB().msg(21, PB().int(1, imeCounter).int(2, fieldCounter).msg(3, edit)))
+        } else {
+            for (code in keyCodesFor(text)) key(code)
+        }
+    }
+
+    companion object {
+        /** Fallback: the text as Android key codes (letters, digits, space and a few symbols; accents removed). */
+        fun keyCodesFor(text: String): List<Int> {
+            val plain = java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFD).replace(Regex("\\p{M}+"), "")
+            return plain.lowercase().mapNotNull { c ->
+                when (c) {
+                    in 'a'..'z' -> 29 + (c - 'a')
+                    in '0'..'9' -> 7 + (c - '0')
+                    ' ' -> 62
+                    '.' -> 56; ',' -> 55; '-' -> 69; '@' -> 77; '/' -> 76; '\'' -> 75
+                    else -> null
+                }
+            }
+        }
+    }
 
     private fun shutdown() {
         try { socket?.close() } catch (_: Exception) {}

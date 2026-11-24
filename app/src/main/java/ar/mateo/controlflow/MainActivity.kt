@@ -28,7 +28,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -97,6 +101,7 @@ object Apps {
     const val YOUTUBE = "https://www.youtube.com"
     const val PRIME = "https://app.primevideo.com"
     const val DISNEY = "https://www.disneyplus.com"
+    const val HBO = "market://launch?id=com.wbd.stream"
     const val FLOW = "market://launch?id=ar.com.flow.androidtv_stb"
 }
 
@@ -115,30 +120,64 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         Ctl.init(this)
+        CastCtl.init(this)
         setContent { AppRoot() }
     }
 
-    override fun onStart() { super.onStart(); Ctl.onStart() }
-    override fun onStop() { super.onStop(); Ctl.onStop() }
+    override fun onStart() { super.onStart(); Ctl.onStart(); CastCtl.onStart() }
+    override fun onStop() { super.onStop(); Ctl.onStop(); CastCtl.onStop() }
 }
 
 @Composable
 fun AppRoot() {
+    val ctx = LocalContext.current
+    val prefs = remember { ctx.getSharedPreferences("ui", android.content.Context.MODE_PRIVATE) }
+    var tab by remember { mutableStateOf(prefs.getInt("tab", 0)) }
+    MaterialTheme(colorScheme = darkColorScheme(primary = Turq, onPrimary = Color(0xFF0E2A29), background = Bg, surface = Body)) {
+        Surface(Modifier.fillMaxSize(), color = Bg) {
+            Column(Modifier.fillMaxSize().systemBarsPadding()) {
+                TabSwitch(tab) { tab = it; prefs.edit().putInt("tab", it).apply() }
+                Box(Modifier.fillMaxWidth().weight(1f)) {
+                    if (tab == 0) FlowTab() else CastScreen()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TabSwitch(selected: Int, onSelect: (Int) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 60.dp, vertical = 6.dp).height(38.dp)
+            .clip(RoundedCornerShape(19.dp)).background(Body).padding(3.dp),
+    ) {
+        listOf("Flow", "Chromecast").forEachIndexed { i, label ->
+            val on = i == selected
+            Box(
+                Modifier.weight(1f).fillMaxSize().clip(RoundedCornerShape(16.dp))
+                    .background(if (on) Turq else Color.Transparent).clickable { onSelect(i) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(label, color = if (on) Color(0xFF16302F) else Label, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+}
+
+/** The original Flowbox remote (unchanged behaviour). */
+@Composable
+fun FlowTab() {
     val conn by Ctl.conn.collectAsState()
     var setup by remember { mutableStateOf(Ctl.host == null) }
     LaunchedEffect(conn) { if (conn == Conn.NeedPairing) setup = true }
-    MaterialTheme(colorScheme = darkColorScheme(primary = Turq, onPrimary = Color(0xFF0E2A29), background = Bg, surface = Body)) {
-        Surface(Modifier.fillMaxSize(), color = Bg) {
-            if (setup) {
-                SetupScreen(
-                    repairHost = if (conn == Conn.NeedPairing) Ctl.host else null,
-                    onDone = { setup = false },
-                    onCancel = if (Ctl.host != null) ({ setup = false; Ctl.cancelPairing(); Ctl.connect() }) else null,
-                )
-            } else {
-                RemoteScreen(conn, onSetup = { setup = true })
-            }
-        }
+    if (setup) {
+        SetupScreen(
+            repairHost = if (conn == Conn.NeedPairing) Ctl.host else null,
+            onDone = { setup = false },
+            onCancel = if (Ctl.host != null) ({ setup = false; Ctl.cancelPairing(); Ctl.connect() }) else null,
+        )
+    } else {
+        RemoteScreen(conn, onSetup = { setup = true })
     }
 }
 
@@ -147,11 +186,12 @@ fun AppRoot() {
 @Composable
 fun RemoteScreen(conn: Conn, onSetup: () -> Unit) {
     var showInfo by remember { mutableStateOf(false) }
+    var showKeyboard by remember { mutableStateOf(false) }
     BoxWithConstraints(
         Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 14.dp, vertical = 8.dp)
     ) {
         // Everything is sized in "units" so the whole remote fits the screen height.
-        val designH = 1010f
+        val designH = 1064f
         val u = min(maxHeight.value / designH, maxWidth.value / 400f).dp.coerceAtMost(1.15.dp)
         Column(
             Modifier
@@ -165,10 +205,7 @@ fun RemoteScreen(conn: Conn, onSetup: () -> Unit) {
             // MODE · · Power
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 RoundKey(u, 58, onFire = { Ctl.key(K.TV_INPUT) }) { TextLabel("MODE", u, 13) }
-                Row(horizontalArrangement = Arrangement.spacedBy(u * 14)) {
-                    Box(Modifier.size(u * 4).clip(CircleShape).background(Color(0xFF3A3B3F)))
-                    Box(Modifier.size(u * 4).clip(CircleShape).background(Color(0xFF3A3B3F)))
-                }
+                RoundKey(u, 58, onFire = { showKeyboard = true }) { KeyboardIcon(u) }
                 RoundKey(u, 58, onFire = { Ctl.key(K.POWER) }) { PowerIcon(u) }
             }
             Spacer(Modifier.height(u * 4))
@@ -213,6 +250,10 @@ fun RemoteScreen(conn: Conn, onSetup: () -> Unit) {
                 AppPill(u, "prime video", Color(0xFF1B2530), FontWeight.Bold) { Ctl.openApp(Apps.PRIME) }
                 AppPill(u, "Disney+", Color(0xFF13235E), FontWeight.Bold) { Ctl.openApp(Apps.DISNEY) }
             }
+            Spacer(Modifier.height(u * 10))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                AppPill(u, "HBO Max", Color(0xFF2A1F8F), FontWeight.Black) { Ctl.openApp(Apps.HBO) }
+            }
             Spacer(Modifier.height(u * 18))
             // Numbers
             val rows = listOf(listOf(1, 2, 3), listOf(4, 5, 6), listOf(7, 8, 9))
@@ -225,6 +266,8 @@ fun RemoteScreen(conn: Conn, onSetup: () -> Unit) {
             RoundKey(u, 60, onFire = { Ctl.key(K.D0) }) { TextLabel("0", u, 26, FontWeight.Normal) }
         }
     }
+
+    if (showKeyboard) KeyboardDialog(onClose = { showKeyboard = false })
 
     if (showInfo) {
         AlertDialog(
@@ -454,7 +497,59 @@ fun AppPill(u: Dp, text: String, color: Color, weight: FontWeight, dot: Color? =
     }
 }
 
+/** Type on the phone and send the text to the search box on the TV. */
+@Composable
+fun KeyboardDialog(onClose: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    var lastSent by remember { mutableStateOf<String?>(null) }
+    val focus = remember { FocusRequester() }
+    val haptic = rememberHaptic()
+    LaunchedEffect(Unit) { delay(150); try { focus.requestFocus() } catch (_: Exception) {} }
+    fun send(search: Boolean, letterByLetter: Boolean = false) {
+        haptic()
+        if (text.isNotEmpty()) { Ctl.sendText(text, letterByLetter); lastSent = text; text = "" }
+        if (search) Ctl.key(66) // ENTER
+    }
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Teclado") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Primero abrí la búsqueda en la tele (que aparezca su teclado). Después escribí acá.", color = Color(0xFFAAAAAA), fontSize = 13.sp)
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it }, singleLine = true,
+                    placeholder = { Text("¿Qué querés buscar?") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { send(search = true) }),
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Button(onClick = { send(search = false) }, enabled = text.isNotEmpty()) { Text("Enviar") }
+                    Button(onClick = { send(search = true) }, colors = ButtonDefaults.buttonColors(containerColor = Turq)) { Text("Buscar ⏎") }
+                    Spacer(Modifier.weight(1f))
+                    RoundKey(1.dp, 44, repeat = true, onFire = { Ctl.key(67) }) { Text("⌫", color = Label, fontSize = 18.sp) }
+                }
+                lastSent?.let {
+                    Text("Enviado: \"$it\"", color = Color(0xFF8BD9A9), fontSize = 13.sp)
+                    TextButton(onClick = { Ctl.sendText(it, letterByLetter = true) }) {
+                        Text("¿No apareció en la tele? Mandarlo letra por letra", fontSize = 13.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onClose) { Text("Cerrar") } },
+    )
+}
+
 // ---- small drawn icons
+@Composable
+private fun KeyboardIcon(u: Dp) = Canvas(Modifier.size(u * 28, u * 20)) {
+    val w = size.minDimension * 0.09f
+    drawRoundRect(Label, style = Stroke(w), cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.height * 0.15f))
+    val kx = size.width / 6f; val ky = size.height / 4f
+    for (r in 1..2) for (c in 1..5) drawCircle(Label, radius = w * 0.7f, center = Offset(c * kx, r * ky))
+    drawLine(Label, Offset(kx * 1.6f, ky * 3.1f), Offset(kx * 4.4f, ky * 3.1f), w, StrokeCap.Round)
+}
 @Composable
 private fun PowerIcon(u: Dp) = Canvas(Modifier.size(u * 24)) {
     val w = size.minDimension * 0.11f

@@ -55,4 +55,5 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 }

@@ -115,6 +115,12 @@ object Ctl {
         s.openApp(link)
     }
 
+    fun sendText(text: String, letterByLetter: Boolean = false) {
+        val s = session
+        if (s == null || conn.value != Conn.Connected) { if (conn.value != Conn.Connecting) connect(); return }
+        s.sendText(text, letterByLetter)
+    }
+
     // ---- Pairing ----
     fun startPairing(h: String, cb: (String?) -> Unit) {
         disconnect()
@@ -155,7 +161,7 @@ object Ctl {
 }
 
 /** Finds Android TV boxes in the Wi-Fi network (the same way the Google TV app does). */
-class Discovery(ctx: Context) {
+class Discovery(ctx: Context, private val type: String = "_androidtvremote2._tcp") {
     data class Dev(val name: String, val host: String)
 
     val devices = MutableStateFlow<List<Dev>>(emptyList())
@@ -192,7 +198,9 @@ class Discovery(ctx: Context) {
                 override fun onServiceResolved(si: NsdServiceInfo) {
                     val addr = si.host?.hostAddress
                     if (addr != null && !addr.contains(":")) {
-                        val d = Dev(si.serviceName ?: addr, addr)
+                        // Chromecasts publish their friendly name in the "fn" TXT record
+                        val fn = try { si.attributes["fn"]?.let { String(it, Charsets.UTF_8) } } catch (_: Exception) { null }
+                        val d = Dev(fn?.takeIf { it.isNotBlank() } ?: si.serviceName ?: addr, addr)
                         devices.value = (devices.value.filter { it.host != addr } + d)
                     }
                     synchronized(this@Discovery) { resolving = false }
@@ -207,7 +215,7 @@ class Discovery(ctx: Context) {
     fun start() {
         if (running) return
         running = true
-        try { nsd.discoverServices("_androidtvremote2._tcp", NsdManager.PROTOCOL_DNS_SD, listener) } catch (_: Exception) { running = false }
+        try { nsd.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, listener) } catch (_: Exception) { running = false }
     }
 
     fun stop() {
