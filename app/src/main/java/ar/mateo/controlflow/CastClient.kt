@@ -10,6 +10,7 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import java.io.BufferedInputStream
@@ -37,7 +38,12 @@ data class CastMedia(
     val position: Double,       // seconds, at the moment [at]
     val duration: Double,       // seconds (0 = unknown / live)
     val at: Long,               // System.currentTimeMillis() when [position] was reported
+    val commands: Long = 0,     // supportedMediaCommands bitmask (0 = unknown)
+    val rate: Double = 1.0,     // playback speed
+    val textTracks: List<Pair<Int, String>> = emptyList(), // subtitles available (id, name)
+    val activeTracks: List<Int> = emptyList(),
 ) {
+    fun supports(bit: Long) = commands == 0L || (commands and bit) != 0L
     fun positionNow(): Double {
         val p = if (state == "PLAYING") position + (System.currentTimeMillis() - at) / 1000.0 else position
         return if (duration > 0) p.coerceIn(0.0, duration) else p.coerceAtLeast(0.0)
@@ -207,7 +213,18 @@ class CastClient(private val host: String, private val onUpdate: (CastState) -> 
             publish(state.copy(media = null, controllable = true))
             return
         }
+        val tracks = (media?.get("tracks") as? JsonArray)?.mapNotNull { t ->
+            val o = t as? JsonObject ?: return@mapNotNull null
+            if (o.str("type") != "TEXT") return@mapNotNull null
+            val id = o.int("trackId") ?: return@mapNotNull null
+            id to (o.str("name") ?: o.str("language")?.uppercase() ?: "Pista $id")
+        }
+        val active = (st["activeTrackIds"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
         val m = CastMedia(
+            commands = (st["supportedMediaCommands"] as? JsonPrimitive)?.longOrNull ?: prev?.commands ?: 0L,
+            rate = st.num("playbackRate") ?: prev?.rate ?: 1.0,
+            textTracks = tracks ?: prev?.textTracks ?: emptyList(),
+            activeTracks = active ?: prev?.activeTracks ?: emptyList(),
             title = meta?.str("title") ?: prev?.title,
             subtitle = meta?.str("subtitle") ?: meta?.str("artist") ?: meta?.str("seriesTitle") ?: meta?.str("albumName") ?: prev?.subtitle,
             image = image ?: prev?.image,
@@ -226,6 +243,24 @@ class CastClient(private val host: String, private val onUpdate: (CastState) -> 
         val playing = m.state == "PLAYING" || m.state == "BUFFERING"
         mediaCmd(if (playing) "PAUSE" else "PLAY")
         publish(state.copy(media = m.copy(state = if (playing) "PAUSED" else "PLAYING", position = m.positionNow(), at = System.currentTimeMillis())))
+    }
+
+    fun play() { val m = state.media ?: return; mediaCmd("PLAY"); publish(state.copy(media = m.copy(state = "PLAYING", position = m.positionNow(), at = System.currentTimeMillis()))) }
+    fun pause() { val m = state.media ?: return; mediaCmd("PAUSE"); publish(state.copy(media = m.copy(state = "PAUSED", position = m.positionNow(), at = System.currentTimeMillis()))) }
+    fun next() = mediaCmd("QUEUE_UPDATE") { put("jump", 1) }
+    fun previous() = mediaCmd("QUEUE_UPDATE") { put("jump", -1) }
+
+    fun setRate(rate: Double) {
+        val m = state.media ?: return
+        mediaCmd("SET_PLAYBACK_RATE") { put("playbackRate", rate) }
+        publish(state.copy(media = m.copy(rate = rate, position = m.positionNow(), at = System.currentTimeMillis())))
+    }
+
+    /** trackId = null turns subtitles off. */
+    fun setSubtitle(trackId: Int?) {
+        val m = state.media ?: return
+        mediaCmd("EDIT_TRACKS_INFO") { put("activeTrackIds", JsonArray(listOfNotNull(trackId?.let { JsonPrimitive(it) }))) }
+        publish(state.copy(media = m.copy(activeTracks = listOfNotNull(trackId))))
     }
 
     fun seekBy(seconds: Double) {

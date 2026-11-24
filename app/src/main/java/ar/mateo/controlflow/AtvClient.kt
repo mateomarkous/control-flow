@@ -136,6 +136,7 @@ class RemoteSession(
     private val host: String,
     private val ctxProvider: () -> SSLContext,
     private val onState: (Conn) -> Unit,
+    private val onApp: (String) -> Unit = {},
 ) {
     @Volatile private var socket: SSLSocket? = null
     @Volatile private var closed = false
@@ -200,7 +201,10 @@ class RemoteSession(
             m.has(8) -> write(PB().msg(9, PB().int(1, m.msg(8)?.int(1) ?: 0L))) // ping -> pong
             m.has(20) -> { // remote_ime_key_inject: a text field got focus
                 val k = m.msg(20)
-                k?.msg(1)?.let { imeCounter = it.int(1).toInt() }
+                k?.msg(1)?.let { info ->
+                    imeCounter = info.int(1).toInt()
+                    info.str(12)?.takeIf { it.isNotBlank() }?.let(onApp) // package of the app on screen
+                }
                 k?.msg(2)?.let { fieldCounter = it.int(1).toInt() }
                 imeSeen = true
             }

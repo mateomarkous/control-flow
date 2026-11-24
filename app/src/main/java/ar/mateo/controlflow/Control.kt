@@ -59,6 +59,8 @@ object Ctl {
     private lateinit var app: Context
     private val main = Handler(Looper.getMainLooper())
     val conn = MutableStateFlow<Conn>(Conn.Idle)
+    /** Package of the app currently on the TV (reported by the box), e.g. "com.netflix.ninja". */
+    val currentApp = MutableStateFlow<String?>(null)
     private var session: RemoteSession? = null
     private var foreground = false
     private var pairing: Pairing? = null
@@ -66,7 +68,7 @@ object Ctl {
     @Volatile private var ssl: SSLContext? = null
     @Volatile private var keyStore: KeyStore? = null
 
-    fun init(ctx: Context) { if (!::app.isInitialized) app = ctx.applicationContext }
+    fun init(ctx: Context) { if (!::app.isInitialized) { app = ctx.applicationContext; loadShortcuts() } }
 
     private val prefs get() = app.getSharedPreferences("cfg", Context.MODE_PRIVATE)
     var host: String?
@@ -90,10 +92,10 @@ object Ctl {
     fun connect() {
         val h = host ?: return
         session?.close()
-        val s = RemoteSession(h, { sslContext() }) { st ->
+        val s = RemoteSession(h, { sslContext() }, { st ->
             conn.value = st
             if (st is Conn.Error && foreground) main.postDelayed({ if (foreground && conn.value is Conn.Error) connect() }, 2500)
-        }
+        }, { pkg -> currentApp.value = pkg })
         session = s
         s.start()
     }
@@ -119,6 +121,40 @@ object Ctl {
         val s = session
         if (s == null || conn.value != Conn.Connected) { if (conn.value != Conn.Connecting) connect(); return }
         s.sendText(text, letterByLetter)
+    }
+
+    // ---- Shortcuts (app buttons the user can add, rename, reassign and reorder) ----
+    data class Shortcut(val name: String, val link: String, val color: Int)
+
+    private val defaultShortcuts = listOf(
+        Shortcut("NETFLIX", "netflix://", 0),
+        Shortcut("YouTube", "https://www.youtube.com", 1),
+        Shortcut("prime video", "https://app.primevideo.com", 2),
+        Shortcut("Disney+", "https://www.disneyplus.com", 3),
+    )
+    val shortcuts = MutableStateFlow<List<Shortcut>>(emptyList())
+
+    fun loadShortcuts() {
+        val raw = prefs.getString("shortcuts", null)
+        shortcuts.value = if (raw == null) defaultShortcuts else try {
+            kotlinx.serialization.json.Json.parseToJsonElement(raw).let { it as kotlinx.serialization.json.JsonArray }.map { e ->
+                val o = e as kotlinx.serialization.json.JsonObject
+                fun str(k: String) = (o[k] as kotlinx.serialization.json.JsonPrimitive).content
+                Shortcut(str("name"), str("link"), str("color").toInt())
+            }
+        } catch (_: Exception) { defaultShortcuts }
+    }
+
+    fun saveShortcuts(list: List<Shortcut>) {
+        shortcuts.value = list
+        val arr = kotlinx.serialization.json.JsonArray(list.map {
+            kotlinx.serialization.json.buildJsonObject {
+                put("name", kotlinx.serialization.json.JsonPrimitive(it.name))
+                put("link", kotlinx.serialization.json.JsonPrimitive(it.link))
+                put("color", kotlinx.serialization.json.JsonPrimitive(it.color.toString()))
+            }
+        })
+        prefs.edit().putString("shortcuts", arr.toString()).apply()
     }
 
     // ---- Pairing ----

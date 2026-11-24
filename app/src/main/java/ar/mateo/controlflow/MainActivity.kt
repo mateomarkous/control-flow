@@ -126,6 +126,34 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() { super.onStart(); Ctl.onStart(); CastCtl.onStart() }
     override fun onStop() { super.onStop(); Ctl.onStop(); CastCtl.onStop() }
+
+    /** The phone's volume buttons control the TV (Flow tab) or the Chromecast (Chromecast tab). */
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
+        val up = keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP
+        val down = keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN
+        if (up || down) {
+            if (UiState.tab == 0 && Ctl.host != null && Ctl.conn.value == Conn.Connected) {
+                Ctl.key(if (up) K.VOL_UP else K.VOL_DOWN); return true
+            }
+            if (UiState.tab == 1 && CastCtl.state.value.conn == Conn.Connected && !CastCtl.state.value.fixedVolume) {
+                CastCtl.volumeStep(if (up) 0.05 else -0.05); return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent?): Boolean {
+        if (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP || keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN) {
+            if ((UiState.tab == 0 && Ctl.conn.value == Conn.Connected) || (UiState.tab == 1 && CastCtl.state.value.conn == Conn.Connected)) return true
+        }
+        return super.onKeyUp(keyCode, event)
+    }
+}
+
+/** Small UI state shared with the activity. */
+object UiState {
+    @Volatile var tab = 0
+    var showFlowInfo by mutableStateOf(false)
 }
 
 @Composable
@@ -133,6 +161,7 @@ fun AppRoot() {
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences("ui", android.content.Context.MODE_PRIVATE) }
     var tab by remember { mutableStateOf(prefs.getInt("tab", 0)) }
+    UiState.tab = tab
     MaterialTheme(colorScheme = darkColorScheme(primary = Turq, onPrimary = Color(0xFF0E2A29), background = Bg, surface = Body)) {
         Surface(Modifier.fillMaxSize(), color = Bg) {
             Column(Modifier.fillMaxSize().systemBarsPadding()) {
@@ -147,9 +176,31 @@ fun AppRoot() {
 
 @Composable
 private fun TabSwitch(selected: Int, onSelect: (Int) -> Unit) {
+    val conn by Ctl.conn.collectAsState()
+    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Spacer(Modifier.size(38.dp))
+        Spacer(Modifier.width(10.dp))
+        TabPills(selected, onSelect, Modifier.weight(1f))
+        Spacer(Modifier.width(10.dp))
+        // Flow connection status (tap: reconnect / change box)
+        if (selected == 0 && Ctl.host != null) {
+            val color = when (conn) {
+                Conn.Connected -> Color(0xFF39D27A)
+                Conn.Connecting, Conn.Idle -> Color(0xFFF2B33D)
+                else -> Color(0xFFEF5350)
+            }
+            Box(
+                Modifier.size(38.dp).clip(CircleShape).background(Body).clickable { UiState.showFlowInfo = true },
+                contentAlignment = Alignment.Center,
+            ) { Box(Modifier.size(12.dp).clip(CircleShape).background(color)) }
+        } else Spacer(Modifier.size(38.dp))
+    }
+}
+
+@Composable
+private fun TabPills(selected: Int, onSelect: (Int) -> Unit, modifier: Modifier) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 60.dp, vertical = 6.dp).height(38.dp)
-            .clip(RoundedCornerShape(19.dp)).background(Body).padding(3.dp),
+        modifier.height(38.dp).clip(RoundedCornerShape(19.dp)).background(Body).padding(3.dp),
     ) {
         listOf("Flow", "Chromecast").forEachIndexed { i, label ->
             val on = i == selected
@@ -185,93 +236,94 @@ fun FlowTab() {
 
 @Composable
 fun RemoteScreen(conn: Conn, onSetup: () -> Unit) {
-    var showInfo by remember { mutableStateOf(false) }
     var showKeyboard by remember { mutableStateOf(false) }
-    BoxWithConstraints(
-        Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 14.dp, vertical = 8.dp)
-    ) {
-        // Everything is sized in "units" so the whole remote fits the screen height.
-        val designH = 1160f // sum of every row + spacing (incl. HBO row and the 0 key)
-        val u = min(maxHeight.value / designH, maxWidth.value / 400f).dp.coerceAtMost(1.15.dp)
+    var editIndex by remember { mutableStateOf<Int?>(null) } // -1 = new shortcut
+    val shortcuts by Ctl.shortcuts.collectAsState()
+    BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 4.dp)) {
+        // Fixed rows are sized in "units"; the D-pad takes all the height that is left.
+        val fixedH = 690f
+        val u = min(maxHeight.value / (fixedH + 230f), maxWidth.value / 370f).dp
         Column(
             Modifier
                 .fillMaxSize()
-                .shadow(16.dp, RoundedCornerShape(u * 54))
-                .clip(RoundedCornerShape(u * 54))
+                .shadow(16.dp, RoundedCornerShape(u * 46))
+                .clip(RoundedCornerShape(u * 46))
                 .background(Brush.verticalGradient(listOf(Body, BodyDark)))
-                .padding(horizontal = u * 26, vertical = u * 18),
+                .padding(horizontal = u * 20, vertical = u * 14),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // MODE · · Power
+            // MODE · LAST · keyboard · GUIDE · power
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                RoundKey(u, 58, onFire = { Ctl.key(K.TV_INPUT) }) { TextLabel("MODE", u, 13) }
-                RoundKey(u, 58, onFire = { showKeyboard = true }) { KeyboardIcon(u) }
-                RoundKey(u, 58, onFire = { Ctl.key(K.POWER) }) { PowerIcon(u) }
+                RoundKey(u, 54, onFire = { Ctl.key(K.TV_INPUT) }) { TextLabel("MODE", u, 12) }
+                RoundKey(u, 54, onFire = { Ctl.key(K.LAST) }) { TextLabel("LAST", u, 13) }
+                RoundKey(u, 54, onFire = { showKeyboard = true }) { KeyboardIcon(u) }
+                RoundKey(u, 54, onFire = { Ctl.key(K.GUIDE) }) { TextLabel("GUIDE", u, 12) }
+                RoundKey(u, 54, onFire = { Ctl.key(K.POWER) }) { PowerIcon(u) }
             }
-            Spacer(Modifier.height(u * 4))
-            // LAST · status · GUIDE
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                RoundKey(u, 58, onFire = { Ctl.key(K.LAST) }) { TextLabel("LAST", u, 14) }
-                StatusKey(u, conn) { showInfo = true }
-                RoundKey(u, 58, onFire = { Ctl.key(K.GUIDE) }) { TextLabel("GUIDE", u, 13) }
+            // D-pad: as big as the remaining space allows
+            BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).padding(vertical = u * 8), contentAlignment = Alignment.Center) {
+                val d = min(maxWidth.value * 0.80f, maxHeight.value) / u.value
+                DPad(u, d.toInt())
             }
-            Spacer(Modifier.height(u * 12))
-            DPad(u, 272)
-            Spacer(Modifier.height(u * 8))
             // Back · flow · EXIT
-            Box(Modifier.fillMaxWidth().height(u * 80)) {
-                Box(Modifier.align(Alignment.TopStart).offset(x = u * 8)) {
-                    RoundKey(u, 60, onFire = { Ctl.key(K.BACK) }) { BackIcon(u) }
+            Box(Modifier.fillMaxWidth().height(u * 64)) {
+                Box(Modifier.align(Alignment.TopStart).offset(x = u * 6)) {
+                    RoundKey(u, 56, onFire = { Ctl.key(K.BACK) }) { BackIcon(u) }
                 }
                 Box(Modifier.align(Alignment.BottomCenter)) {
-                    RoundKey(u, 72, bg = Turq, bgPressed = TurqPressed, onFire = { Ctl.openApp(Apps.FLOW) }) {
-                        Text("flow", color = Color(0xFF16302F), fontSize = sp(u, 25), fontWeight = FontWeight.Medium)
+                    RoundKey(u, 64, bg = Turq, bgPressed = TurqPressed, onFire = { Ctl.openApp(Apps.FLOW) }) {
+                        Text("flow", color = Color(0xFF16302F), fontSize = sp(u, 23), fontWeight = FontWeight.Medium)
                     }
                 }
-                Box(Modifier.align(Alignment.TopEnd).offset(x = -u * 8)) {
-                    RoundKey(u, 60, onFire = { Ctl.key(K.EXIT) }) { TextLabel("EXIT", u, 14) }
+                Box(Modifier.align(Alignment.TopEnd).offset(x = -u * 6)) {
+                    RoundKey(u, 56, onFire = { Ctl.key(K.EXIT) }) { TextLabel("EXIT", u, 14) }
                 }
             }
-            Spacer(Modifier.height(u * 4))
+            Spacer(Modifier.height(u * 6))
             // VOL · home · CH
-            Row(Modifier.fillMaxWidth().padding(horizontal = u * 8), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = u * 6), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Rocker(u, "VOL", { Ctl.key(K.VOL_UP) }, { Ctl.key(K.VOL_DOWN) }, top = { PlusIcon(u) }, bottom = { MinusIcon(u) })
-                RoundKey(u, 74, onFire = { Ctl.key(K.HOME) }) { RingIcon(u) }
+                RoundKey(u, 70, onFire = { Ctl.key(K.HOME) }) { RingIcon(u) }
                 Rocker(u, "CH", { Ctl.key(K.CH_UP) }, { Ctl.key(K.CH_DOWN) }, top = { Chevron(u, up = true) }, bottom = { Chevron(u, up = false) })
             }
-            Spacer(Modifier.height(u * 18))
-            // Streaming
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                AppPill(u, "NETFLIX", Color(0xFFD81F26), FontWeight.Black) { Ctl.openApp(Apps.NETFLIX) }
-                AppPill(u, "YouTube", Color(0xFF202020), FontWeight.Bold, dot = Color(0xFFE62117)) { Ctl.openApp(Apps.YOUTUBE) }
-            }
-            Spacer(Modifier.height(u * 10))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                AppPill(u, "prime video", Color(0xFF1B2530), FontWeight.Bold) { Ctl.openApp(Apps.PRIME) }
-                AppPill(u, "Disney+", Color(0xFF13235E), FontWeight.Bold) { Ctl.openApp(Apps.DISNEY) }
-            }
-            Spacer(Modifier.height(u * 10))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                AppPill(u, "HBO Max", Color(0xFF2A1F8F), FontWeight.Black) { Ctl.openApp(Apps.HBO) }
-            }
-            Spacer(Modifier.height(u * 18))
-            // Numbers
-            val rows = listOf(listOf(1, 2, 3), listOf(4, 5, 6), listOf(7, 8, 9))
-            for (r in rows) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = u * 14), horizontalArrangement = Arrangement.SpaceBetween) {
-                    for (n in r) RoundKey(u, 60, onFire = { Ctl.key(K.D0 + n) }) { TextLabel("$n", u, 26, FontWeight.Normal) }
+            Spacer(Modifier.height(u * 14))
+            // App shortcuts: 4 per row, editable (long press), "+" to add
+            val tiles: List<Int> = shortcuts.indices.toList() + (if (shortcuts.size < 8) listOf(-1) else emptyList())
+            tiles.chunked(4).forEachIndexed { r, row ->
+                if (r > 0) Spacer(Modifier.height(u * 8))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(u * 8)) {
+                    for (i in row) {
+                        if (i == -1) AddTile(u, Modifier.weight(1f)) { editIndex = -1 }
+                        else {
+                            val sc = shortcuts[i]
+                            ShortcutTile(u, sc, Modifier.weight(1f), onTap = { Ctl.openApp(sc.link) }, onLongPress = { editIndex = i })
+                        }
+                    }
+                    repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
                 }
-                Spacer(Modifier.height(u * 10))
             }
-            RoundKey(u, 60, onFire = { Ctl.key(K.D0) }) { TextLabel("0", u, 26, FontWeight.Normal) }
+            Spacer(Modifier.height(u * 14))
+            // Numbers: wide keys using the full width
+            val rows = listOf(listOf(1, 2, 3), listOf(4, 5, 6), listOf(7, 8, 9), listOf(-1, 0, -1))
+            rows.forEachIndexed { r, row ->
+                if (r > 0) Spacer(Modifier.height(u * 8))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(u * 10)) {
+                    for (n in row) {
+                        if (n < 0) Spacer(Modifier.weight(1f))
+                        else WideKey(u, Modifier.weight(1f), onFire = { Ctl.key(K.D0 + n) }) { TextLabel("$n", u, 24, FontWeight.Normal) }
+                    }
+                }
+            }
         }
     }
 
     if (showKeyboard) KeyboardDialog(onClose = { showKeyboard = false })
+    editIndex?.let { idx -> ShortcutDialog(idx, onClose = { editIndex = null }) }
 
-    if (showInfo) {
+    if (UiState.showFlowInfo) {
+        val current by Ctl.currentApp.collectAsState()
         AlertDialog(
-            onDismissRequest = { showInfo = false },
+            onDismissRequest = { UiState.showFlowInfo = false },
             title = { Text("Conexión") },
             text = {
                 Text(
@@ -281,13 +333,148 @@ fun RemoteScreen(conn: Conn, onSetup: () -> Unit) {
                         Conn.Idle -> "desconectado"
                         Conn.NeedPairing -> "hay que vincular de nuevo"
                         is Conn.Error -> "error: ${conn.msg}"
-                    }
+                    } + (current?.let { "\nApp en pantalla: $it" } ?: "")
                 )
             },
-            confirmButton = { TextButton(onClick = { showInfo = false; Ctl.connect() }) { Text("Reconectar") } },
-            dismissButton = { TextButton(onClick = { showInfo = false; onSetup() }) { Text("Cambiar deco / vincular") } },
+            confirmButton = { TextButton(onClick = { UiState.showFlowInfo = false; Ctl.connect() }) { Text("Reconectar") } },
+            dismissButton = { TextButton(onClick = { UiState.showFlowInfo = false; onSetup() }) { Text("Cambiar deco / vincular") } },
         )
     }
+}
+
+/** Colors available for shortcut labels. */
+val ShortcutColors = listOf(
+    Color(0xFFD81F26), Color(0xFF202020), Color(0xFF1B2530), Color(0xFF13235E),
+    Color(0xFF2A1F8F), Color(0xFF1DB954), Color(0xFF0064FF), Color(0xFFE5A00D),
+)
+
+@Composable
+fun WideKey(u: Dp, modifier: Modifier, repeat: Boolean = false, onFire: () -> Unit, content: @Composable () -> Unit) {
+    var pressed by remember { mutableStateOf(false) }
+    val fire by rememberUpdatedState(onFire)
+    val haptic = rememberHaptic()
+    val shape = RoundedCornerShape(u * 26)
+    Box(
+        modifier.height(u * 52)
+            .graphicsLayer { val s = if (pressed) 0.95f else 1f; scaleX = s; scaleY = s }
+            .shadow(if (pressed) 1.dp else 4.dp, shape).clip(shape)
+            .background(if (pressed) BtnPressed else Btn)
+            .border(1.dp, Color(0x22FFFFFF), shape)
+            .pressKey(repeat, { pressed = it }, { _, _ -> fire() }, haptic),
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
+@Composable
+fun ShortcutTile(u: Dp, sc: Ctl.Shortcut, modifier: Modifier, onTap: () -> Unit, onLongPress: () -> Unit) {
+    var pressed by remember { mutableStateOf(false) }
+    val tap by rememberUpdatedState(onTap)
+    val long by rememberUpdatedState(onLongPress)
+    val view = LocalView.current
+    val shape = RoundedCornerShape(u * 22)
+    Box(
+        modifier.height(u * 44)
+            .graphicsLayer { val s = if (pressed) 0.95f else 1f; scaleX = s; scaleY = s }
+            .shadow(3.dp, shape).clip(shape).background(if (pressed) Color(0xFFD9D9D6) else Pill)
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = { pressed = true; tryAwaitRelease(); pressed = false },
+                    onTap = { view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); tap() },
+                    onLongPress = { view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); long() },
+                )
+            }
+            .padding(horizontal = u * 4),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            sc.name, color = ShortcutColors.getOrElse(sc.color) { ShortcutColors[1] },
+            fontSize = sp(u, if (sc.name.length > 9) 12 else 15), fontWeight = FontWeight.Bold, maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+fun AddTile(u: Dp, modifier: Modifier, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(u * 22)
+    Box(
+        modifier.height(u * 44).clip(shape).border(1.5.dp, Color(0xFF55575C), shape).clickable { onClick() },
+        contentAlignment = Alignment.Center,
+    ) { Text("+ App", color = Color(0xFFAAAAAA), fontSize = sp(u, 14), fontWeight = FontWeight.SemiBold) }
+}
+
+/** Add / edit a shortcut. index = -1 creates a new one. */
+@Composable
+fun ShortcutDialog(index: Int, onClose: () -> Unit) {
+    val list = Ctl.shortcuts.value
+    val editing = list.getOrNull(index)
+    val current by Ctl.currentApp.collectAsState()
+    var name by remember { mutableStateOf(editing?.name ?: "") }
+    var link by remember { mutableStateOf(editing?.link ?: "") }
+    var color by remember { mutableStateOf(editing?.color ?: 1) }
+    fun pkgOf(l: String) = l.removePrefix("market://launch?id=")
+
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text(if (editing == null) "Nuevo botón" else "Editar botón") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it.take(14) }, singleLine = true,
+                    label = { Text("Nombre del botón") }, modifier = Modifier.fillMaxWidth(),
+                )
+                Text("App que abre", color = Label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text(
+                    if (link.isBlank()) "Todavía no elegiste ninguna." else pkgOf(link),
+                    color = Color(0xFFAAAAAA), fontSize = 13.sp,
+                )
+                Text("Abrí la app en la tele con el control y tocá:", color = Color(0xFFAAAAAA), fontSize = 13.sp)
+                Button(
+                    onClick = { current?.let { link = "market://launch?id=$it" } },
+                    enabled = current != null,
+                    colors = ButtonDefaults.buttonColors(containerColor = Turq),
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(if (current != null) "Usar la app en pantalla" else "Esperando a que el deco informe la app…", fontSize = 14.sp) }
+                current?.let { Text("En pantalla ahora: $it", color = Color(0xFF8BD9A9), fontSize = 12.sp) }
+                Text("Color del nombre", color = Label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ShortcutColors.forEachIndexed { i, c ->
+                        Box(
+                            Modifier.size(26.dp).clip(CircleShape).background(c)
+                                .border(if (i == color) 3.dp else 1.dp, if (i == color) Turq else Color(0x55FFFFFF), CircleShape)
+                                .clickable { color = i }
+                        )
+                    }
+                }
+                if (editing != null) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = {
+                            if (index > 0) { val l = list.toMutableList(); val t = l[index]; l[index] = l[index - 1]; l[index - 1] = t; Ctl.saveShortcuts(l); onClose() }
+                        }, enabled = index > 0) { Text("◀ Mover") }
+                        TextButton(onClick = {
+                            if (index < list.size - 1) { val l = list.toMutableList(); val t = l[index]; l[index] = l[index + 1]; l[index + 1] = t; Ctl.saveShortcuts(l); onClose() }
+                        }, enabled = index < list.size - 1) { Text("Mover ▶") }
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = { Ctl.saveShortcuts(list.filterIndexed { i, _ -> i != index }); onClose() }) {
+                            Text("Borrar", color = Color(0xFFEF6F6C))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val sc = Ctl.Shortcut(name.trim(), link, color)
+                    val l = list.toMutableList()
+                    if (editing == null) l.add(sc) else l[index] = sc
+                    Ctl.saveShortcuts(l); onClose()
+                },
+                enabled = name.isNotBlank() && link.isNotBlank(),
+            ) { Text("Guardar") }
+        },
+        dismissButton = { TextButton(onClick = onClose) { Text("Cancelar") } },
+    )
 }
 
 @Composable

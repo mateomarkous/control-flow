@@ -56,4 +56,6 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.media:media:1.7.0")
 }

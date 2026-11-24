@@ -96,11 +96,34 @@ object CastCtl {
         get() = prefs.getString("name", null)
         private set(v) { prefs.edit().putString("name", v).apply() }
 
-    fun onStart() { started = true; if (visible) connect() }
-    fun onStop() { started = false; disconnect() }
+    /** True while the notification / lock-screen controls service is running (keeps the connection). */
+    @Volatile var serviceRunning = false
+
+    fun onStart() { started = true; if (visible && client == null) connect() }
+    fun onStop() { started = false; if (!serviceRunning) disconnect() }
     fun setVisible(v: Boolean) {
         visible = v
-        if (v && started) connect() else if (!v) disconnect()
+        if (v && started) { if (client == null) connect() } else if (!v && !serviceRunning) disconnect()
+    }
+
+    /** Called by the service when it finishes. */
+    fun serviceStopped() {
+        serviceRunning = false
+        main.post { if (!(visible && started)) disconnect() }
+    }
+
+    /** Title the user dismissed from the notification: don't bring the notification back for it. */
+    @Volatile var dismissedTitle: String? = null
+
+    private fun maybeStartService(st: CastState) {
+        if (st.media == null || serviceRunning || !started) return
+        if (dismissedTitle != null && st.media.title == dismissedTitle) return
+        serviceRunning = true
+        main.post {
+            try {
+                androidx.core.content.ContextCompat.startForegroundService(app, android.content.Intent(app, CastService::class.java))
+            } catch (_: Exception) { serviceRunning = false }
+        }
     }
 
     fun choose(h: String, n: String) { host = h; name = n; connect() }
@@ -110,6 +133,7 @@ object CastCtl {
         client?.close()
         client = CastClient(h) { st ->
             state.value = st
+            maybeStartService(st)
             if (st.conn is Conn.Error && visible && started) {
                 main.postDelayed({ if (visible && started && state.value.conn is Conn.Error) connect() }, 3000)
             }
@@ -119,6 +143,13 @@ object CastCtl {
     fun disconnect() { client?.close(); client = null; state.value = CastState() }
 
     fun playPause() = client?.playPause()
+    fun play() = client?.play()
+    fun pause() = client?.pause()
+    fun next() = client?.next()
+    fun previous() = client?.previous()
+    fun setRate(r: Double) = client?.setRate(r)
+    fun setSubtitle(id: Int?) = client?.setSubtitle(id)
+    fun volumeStep(d: Double) { if (state.value.conn == Conn.Connected && !state.value.fixedVolume) setVolume(state.value.volume + d) }
     fun seekBy(s: Double) = client?.seekBy(s)
     fun seekTo(s: Double) = client?.seekTo(s)
     fun stopApp() = client?.stopApp()
@@ -129,6 +160,17 @@ object CastCtl {
 @Composable
 fun CastScreen() {
     DisposableEffect(Unit) { CastCtl.setVisible(true); onDispose { CastCtl.setVisible(false) } }
+    // Lock-screen / notification controls need notification permission on Android 13+
+    val ctx = LocalContext.current
+    val askNotif = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { }
+    LaunchedEffect(Unit) {
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) askNotif.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+    }
     val st by CastCtl.state.collectAsState()
     var choosing by remember { mutableStateOf(CastCtl.host == null) }
     if (choosing) {
@@ -164,15 +206,16 @@ fun CastRemote(st: CastState, onChange: () -> Unit) {
     val u = 1.dp
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { delay(500); now = System.currentTimeMillis() } }
+    val m = st.media
 
+    // Everything fits on one screen: the picture takes whatever height is left.
     Column(
-        Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 8.dp)
-            .clip(RoundedCornerShape(40.dp))
+        Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(36.dp))
             .background(Brush.verticalGradient(listOf(CBg, CBgDark)))
-            .verticalScroll(rememberScrollState())
-            .padding(22.dp),
+            .padding(horizontal = 18.dp, vertical = 14.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         // Device header
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -181,33 +224,43 @@ fun CastRemote(st: CastState, onChange: () -> Unit) {
                 Conn.Connecting, Conn.Idle -> Color(0xFFF2B33D)
                 else -> Color(0xFFEF5350)
             }
-            Box(Modifier.size(12.dp).clip(CircleShape).background(dot))
+            Box(Modifier.size(11.dp).clip(CircleShape).background(dot))
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text(CastCtl.name ?: "Chromecast", color = CLabel, fontSize = 19.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(CastCtl.name ?: "Chromecast", color = CLabel, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val sub = when (val c = st.conn) {
                     Conn.Connected -> "Conectado"
                     Conn.Connecting, Conn.Idle -> "Conectando…"
                     is Conn.Error -> c.msg
                     else -> ""
                 }
-                Text(sub, color = CGrey, fontSize = 13.sp, maxLines = 1)
+                Text(sub, color = CGrey, fontSize = 12.sp, maxLines = 1)
+            }
+            if (st.appName != null) {
+                Box(
+                    Modifier.clip(RoundedCornerShape(14.dp)).border(1.dp, Color(0xFF4A4C51), RoundedCornerShape(14.dp))
+                        .clickable { CastCtl.stopApp() }.padding(horizontal = 10.dp, vertical = 6.dp)
+                ) { Text("■ Cortar", color = CLabel, fontSize = 13.sp) }
+                Spacer(Modifier.width(6.dp))
             }
             TextButton(onClick = onChange) { Text("Cambiar", color = CTurq) }
         }
 
-        // Now playing
-        val m = st.media
+        // Picture (flexible height)
         val img = rememberImage(m?.image)
-        Box(
-            Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(20.dp)).background(Color(0xFF111214)),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (img != null) Image(img, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            else Text(st.appName ?: "Nada en reproducción", color = Color(0xFF55575C), fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+        Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+            Box(
+                Modifier.aspectRatio(16f / 9f).clip(RoundedCornerShape(18.dp)).background(Color(0xFF111214)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (img != null) Image(img, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                else Text(st.appName ?: "Nada en reproducción", color = Color(0xFF55575C), fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            }
         }
+
+        // Title
         Column(Modifier.fillMaxWidth()) {
-            Text(st.appName?.uppercase() ?: "", color = CTurq, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text(st.appName?.uppercase() ?: "", color = CTurq, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             Text(
                 m?.title ?: when {
                     st.conn != Conn.Connected -> " "
@@ -215,12 +268,9 @@ fun CastRemote(st: CastState, onChange: () -> Unit) {
                     !st.controllable -> "Esta app no se puede controlar desde acá"
                     else -> "Esperando que empiece la reproducción…"
                 },
-                color = CLabel, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                color = CLabel, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
             )
-            if (m?.subtitle != null) Text(m.subtitle, color = CGrey, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (m == null && st.appName == null && st.conn == Conn.Connected) {
-                Text("Mandá algo desde una app (YouTube, Disney+, etc.) y lo vas a poder controlar acá.", color = CGrey, fontSize = 13.sp)
-            }
+            if (m?.subtitle != null) Text(m.subtitle, color = CGrey, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
 
         // Progress
@@ -233,22 +283,24 @@ fun CastRemote(st: CastState, onChange: () -> Unit) {
                     value = if (dragging) dragValue else (pos / m.duration).toFloat().coerceIn(0f, 1f),
                     onValueChange = { dragging = true; dragValue = it },
                     onValueChangeFinished = { CastCtl.seekTo(dragValue * m.duration); dragging = false },
+                    modifier = Modifier.height(28.dp),
                     colors = SliderDefaults.colors(thumbColor = CTurq, activeTrackColor = CTurq, inactiveTrackColor = Color(0xFF3A3B3F)),
                 )
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(fmt(if (dragging) dragValue * m.duration else pos), color = CGrey, fontSize = 13.sp)
-                    Text(fmt(m.duration), color = CGrey, fontSize = 13.sp)
+                    Text(fmt(if (dragging) dragValue * m.duration else pos), color = CGrey, fontSize = 12.sp)
+                    Text(fmt(m.duration), color = CGrey, fontSize = 12.sp)
                 }
             }
         }
 
-        // Transport controls
-        val enabled = m != null
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-            RoundKey(u, 68, onFire = { CastCtl.seekBy(-10.0) }) { SkipLabel("10", back = true, dim = !enabled) }
+        // Transport: previous · -10 · play/pause · +10 · next
+        val dim = m == null
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            RoundKey(u, 50, onFire = { CastCtl.previous() }) { TrackIcon(next = false, dim = dim || m?.supports(128) == false) }
+            RoundKey(u, 60, onFire = { CastCtl.seekBy(-10.0) }) { SkipLabel("10", back = true, dim = dim) }
             val playing = m?.state == "PLAYING" || m?.state == "BUFFERING"
-            RoundKey(u, 100, bg = CTurq, bgPressed = CTurqPressed, onFire = { CastCtl.playPause() }) {
-                Canvas(Modifier.size(36.dp)) {
+            RoundKey(u, 84, bg = CTurq, bgPressed = CTurqPressed, onFire = { CastCtl.playPause() }) {
+                Canvas(Modifier.size(30.dp)) {
                     val c = Color(0xFF16302F)
                     if (playing) {
                         val w = size.width * 0.28f
@@ -260,39 +312,71 @@ fun CastRemote(st: CastState, onChange: () -> Unit) {
                     }
                 }
             }
-            RoundKey(u, 68, onFire = { CastCtl.seekBy(10.0) }) { SkipLabel("10", back = false, dim = !enabled) }
+            RoundKey(u, 60, onFire = { CastCtl.seekBy(10.0) }) { SkipLabel("10", back = false, dim = dim) }
+            RoundKey(u, 50, onFire = { CastCtl.next() }) { TrackIcon(next = true, dim = dim || m?.supports(64) == false) }
         }
 
-        // Volume
+        // Volume: mute · − · slider · +
         if (st.conn == Conn.Connected && !st.fixedVolume) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                RoundKey(u, 52, onFire = { CastCtl.toggleMute() }) { SpeakerIcon(muted = st.muted) }
-                Spacer(Modifier.width(10.dp))
+                RoundKey(u, 44, onFire = { CastCtl.toggleMute() }) { SpeakerIcon(muted = st.muted) }
+                Spacer(Modifier.width(8.dp))
+                RoundKey(u, 40, repeat = true, onFire = { CastCtl.volumeStep(-0.05) }) { Text("−", color = CLabel, fontSize = 20.sp) }
                 var volDrag by remember { mutableStateOf<Float?>(null) }
                 Slider(
                     value = volDrag ?: st.volume.toFloat(),
                     onValueChange = { volDrag = it },
                     onValueChangeFinished = { volDrag?.let { CastCtl.setVolume(it.toDouble()) }; volDrag = null },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).padding(horizontal = 6.dp).height(28.dp),
                     colors = SliderDefaults.colors(thumbColor = CLabel, activeTrackColor = CLabel, inactiveTrackColor = Color(0xFF3A3B3F)),
                 )
-                Spacer(Modifier.width(10.dp))
-                Text("${((volDrag ?: st.volume.toFloat()) * 100).toInt()}%", color = CGrey, fontSize = 13.sp, modifier = Modifier.width(40.dp))
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                RoundKey(u, 56, repeat = true, onFire = { CastCtl.setVolume(CastCtl.state.value.volume - 0.05) }) {
-                    Text("VOL −", color = CLabel, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                }
-                RoundKey(u, 56, repeat = true, onFire = { CastCtl.setVolume(CastCtl.state.value.volume + 0.05) }) {
-                    Text("VOL +", color = CLabel, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                }
+                RoundKey(u, 40, repeat = true, onFire = { CastCtl.volumeStep(0.05) }) { Text("+", color = CLabel, fontSize = 20.sp) }
+                Spacer(Modifier.width(6.dp))
+                Text("${((volDrag ?: st.volume.toFloat()) * 100).toInt()}%", color = CGrey, fontSize = 12.sp, modifier = Modifier.width(36.dp))
             }
         }
 
-        if (st.appName != null) {
-            OutlinedButton(onClick = { CastCtl.stopApp() }) { Text("Dejar de transmitir", color = CLabel) }
+        // Extras: speed · subtitles
+        if (m != null) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
+                if (m.supports(8192)) {
+                    val speeds = listOf(1.0, 1.25, 1.5, 2.0, 0.75)
+                    val label = if (m.rate % 1.0 == 0.0) "${m.rate.toInt()}x" else "${m.rate}x"
+                    Chip("Velocidad $label") {
+                        val i = speeds.indexOfFirst { kotlin.math.abs(it - m.rate) < 0.01 }
+                        CastCtl.setRate(speeds[(i + 1) % speeds.size])
+                    }
+                }
+                if (m.textTracks.isNotEmpty()) {
+                    val cur = m.textTracks.firstOrNull { it.first in m.activeTracks }
+                    Chip("Subtítulos: ${cur?.second ?: "No"}") {
+                        val idx = m.textTracks.indexOf(cur)
+                        val nextTrack = if (idx + 1 < m.textTracks.size) m.textTracks[idx + 1].first else null
+                        CastCtl.setSubtitle(nextTrack)
+                    }
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun Chip(text: String, onClick: () -> Unit) {
+    Box(
+        Modifier.clip(RoundedCornerShape(16.dp)).background(Color(0xFF2E3034)).clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+    ) { Text(text, color = CLabel, fontSize = 13.sp, maxLines = 1) }
+}
+
+@Composable
+private fun TrackIcon(next: Boolean, dim: Boolean) = Canvas(Modifier.size(20.dp)) {
+    val col = if (dim) Color(0xFF66686D) else CLabel
+    val p = Path()
+    if (next) { p.moveTo(0f, 0f); p.lineTo(size.width * 0.75f, size.height / 2); p.lineTo(0f, size.height); p.close() }
+    else { p.moveTo(size.width, 0f); p.lineTo(size.width * 0.25f, size.height / 2); p.lineTo(size.width, size.height); p.close() }
+    drawPath(p, col)
+    val x = if (next) size.width * 0.82f else 0f
+    drawRect(col, Offset(x, 0f), androidx.compose.ui.geometry.Size(size.width * 0.18f, size.height))
 }
 
 @Composable
